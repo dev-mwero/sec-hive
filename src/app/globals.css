@@ -1,26 +1,324 @@
 @import "tailwindcss";
 
+/*
+ * SecHive design tokens — "The Duty Board".
+ *
+ * The world this product lives in is a security control room at 02:00. Its artifacts are the
+ * duty board on the wall, the radio, the hi-vis stripe, the floodlit gate and the printed duty
+ * roster. The palette and type come from those objects, not from a generic dashboard template:
+ *
+ * - Base is a desaturated blue-graphite, so it reads as equipment rather than as a website, and
+ *   so the signal colours below stay legible against it.
+ * - Amber is the accent: the colour of a floodlight, a hazard beacon and a hi-vis stripe. It is
+ *   also functionally correct — amber means "attention", which is what an ops console is for.
+ * - Green / amber / red are a signal-lamp vocabulary borrowed from status boards, used strictly
+ *   for duty status. Every status renders text + icon + colour, never colour alone (WCAG 1.4.1).
+ * - All operational numbers are set in IBM Plex Mono with tabular figures, because a duty roster
+ *   is a columnar document and columns must align.
+ *
+ * See docs/architecture.md section 9.
+ */
+
+/* Class-based dark mode. The console is dark-first because a 24/7 ops tool is used at night;
+   light mode exists because administrators work in daylight offices. */
+@custom-variant dark (&:is(.dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Surfaces — cool graphite, not black */
+  --background: #0e1419;
+  --surface: #141c23;
+  --surface-raised: #1b252e;
+  --surface-inset: #0a1015;
+
+  /* Hairlines. Dashed rules on the board, solid rules on the console. */
+  --border: #253039;
+  --border-strong: #33424e;
+
+  /* Type */
+  --foreground: #e9eef3;
+  --foreground-muted: #93a4b1;
+  --foreground-subtle: #64757f;
+
+  /* Accent — floodlight amber */
+  --accent: #f5a524;
+  --accent-hover: #ffb648;
+  --accent-foreground: #17110a;
+  --accent-subtle: #f5a5241f;
+
+  /* Signal lamps. Reserved for duty status; not decorative. */
+  --signal-covered: #3dd68c;
+  --signal-covered-subtle: #3dd68c1f;
+  --signal-attention: #f5a524;
+  --signal-attention-subtle: #f5a5241f;
+  --signal-critical: #f2545b;
+  --signal-critical-subtle: #f2545b1f;
+  --signal-neutral: #7f93a1;
+  --signal-neutral-subtle: #7f93a11a;
+
+  /* Focus ring — must be visible on both surfaces */
+  --ring: #f5a524;
+
+  /* Radii. Tight: this is equipment, not a consumer app. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+
+  /* Status colours mapped to Tailwind's scale for direct utility use */
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-inset: var(--surface-inset);
+  --color-border-base: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-foreground-subtle: var(--foreground-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-covered: var(--signal-covered);
+  --color-attention: var(--signal-attention);
+  --color-critical: var(--signal-critical);
+  --color-neutral-signal: var(--signal-neutral);
+}
+
+/*
+ * Light mode is not an inversion — it is a re-tuned console. Amber is darkened to hold its
+ * contrast on white, and the signal colours are deepened for the same reason. Signal semantics
+ * must not change with the theme.
+ */
+.light {
+  --background: #f7f9fa;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-inset: #eef2f5;
+  --border: #dbe3e9;
+  --border-strong: #c2ced7;
+  --foreground: #0e1419;
+  --foreground-muted: #4c5c68;
+  --foreground-subtle: #6d7d88;
+  --accent: #a86300;
+  --accent-hover: #8d5200;
+  --accent-foreground: #ffffff;
+  --accent-subtle: #a8630014;
+  --signal-covered: #0f7a4f;
+  --signal-covered-subtle: #0f7a4f14;
+  --signal-attention: #a86300;
+  --signal-attention-subtle: #a8630014;
+  --signal-critical: #c02634;
+  --signal-critical-subtle: #c0263414;
+  --signal-neutral: #5b6b76;
+  --signal-neutral-subtle: #5b6b7614;
+  --ring: #a86300;
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-inset: var(--surface-inset);
+  --color-border-base: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-foreground-subtle: var(--foreground-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-covered: var(--signal-covered);
+  --color-covered-subtle: var(--signal-covered-subtle);
+  --color-attention: var(--signal-attention);
+  --color-attention-subtle: var(--signal-attention-subtle);
+  --color-critical: var(--signal-critical);
+  --color-critical-subtle: var(--signal-critical-subtle);
+  --color-neutral-signal: var(--signal-neutral);
+  --color-neutral-subtle: var(--signal-neutral-subtle);
+  --color-ring: var(--ring);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+
+  --font-sans: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --font-narrow:
+    var(--font-archivo-narrow), var(--font-archivo), ui-sans-serif, system-ui,
+    sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
+
+  /*
+   * Reduced type scale. An ops console is a data surface: density beats drama, so the steps
+   * are tighter than a marketing scale would use.
+   */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-2xs--letter-spacing: 0.08em;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-xs--letter-spacing: 0.04em;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.625rem;
+  --text-2xl: 1.375rem;
+  --text-2xl--line-height: 1.75rem;
+  --text-3xl: 1.75rem;
+  --text-3xl--line-height: 2.125rem;
+  --text-4xl: 2.25rem;
+  --text-4xl--line-height: 2.5rem;
+  --text-5xl: 3rem;
+  --text-5xl--line-height: 3.25rem;
+
+  --shadow-panel:
+    0 1px 2px rgb(0 0 0 / 0.28), 0 8px 24px -12px rgb(0 0 0 / 0.45);
+  --shadow-popover:
+    0 4px 8px -2px rgb(0 0 0 / 0.3), 0 16px 40px -16px rgb(0 0 0 / 0.5);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html.light {
+    color-scheme: light;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv05", "ss01";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Operational data is columnar, so figures must align vertically across a roster. Applied
+   * to the mono utility and to any cell holding an id, time, count or status.
+   */
+  .font-mono,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* Focus is always visible, never removed. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background-color: var(--accent-subtle);
+    color: var(--foreground);
+  }
+
+  /* Scrollbars that belong to a console rather than to the OS. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--border-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--foreground-subtle);
+  }
+
+  /*
+   * Hatched fill for uncovered posts — the duty board's "empty slot" treatment. It carries
+   * meaning independent of colour, so the state survives a monochrome display.
+   */
+  .hatch-uncovered {
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 5px,
+      color-mix(in oklab, var(--signal-critical) 22%, transparent) 5px 10px
+    );
+  }
+
+  .hatch-neutral {
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 5px,
+      color-mix(in oklab, var(--signal-neutral) 18%, transparent) 5px 10px
+    );
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /*
+   * Block lettering for field labels, in the style of the printed headings on a duty roster:
+   * narrow, uppercase, wide tracking. Used for eyebrows, table headers and metric captions —
+   * never for body copy, where it costs legibility.
+   */
+  .label-block {
+    font-family: var(--font-narrow);
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    line-height: 1rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--foreground-subtle);
+  }
+
+  /* Ruled section header, like a printed form field group. */
+  .rule-block {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.5rem;
+  }
+
+  /* Console panel: a surface with a hairline, not a floating rounded card. */
+  .panel {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+  }
 }
+
+/*
+ * Respect reduced motion.
+ *
+ * `!important` is required and deliberate: user-level `prefers-reduced-motion` must win over any
+ * component animation regardless of specificity. The biome rule is suppressed for this block
+ * rather than removing the override, which would leave motion-sensitive users with animation.
+ */
+/* biome-ignore-start lint/complexity/noImportantStyles: reduced-motion must override component specificity */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* biome-ignore-end lint/complexity/noImportantStyles: see above */
