@@ -53,7 +53,7 @@ export type User = {
   role: Role;
   status: "active" | "inactive" | "invited";
   clientId: Id | null;
-  lastLoginAt: string | null;
+  lastLoginAt: Date | null;
 };
 
 export type Guard = {
