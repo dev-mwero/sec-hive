@@ -38,6 +38,7 @@ import {
   ORGANIZATION_SCOPE,
   resolveScope,
   type Scope,
+  type ScopeTarget,
   SELF_SCOPE,
   scopeFilter,
   sitesScope,
@@ -455,7 +456,7 @@ describe("scopeFilter()", () => {
   it("returns an empty filter ONLY for organisation-wide scope", () => {
     // `{}` matches every document in the collection. If a non-org-wide role ever resolves to it,
     // that is a full tenant leak, so this is asserted rather than left to review.
-    expect(scopeFilter(ORGANIZATION_SCOPE)).toEqual({});
+    expect(scopeFilter(ORGANIZATION_SCOPE, "child")).toEqual({});
 
     const nonOrgWide: Scope[] = [
       sitesScope(["site-1"]),
@@ -464,27 +465,176 @@ describe("scopeFilter()", () => {
     ];
 
     for (const scope of nonOrgWide) {
-      expect(scopeFilter(scope)).not.toEqual({});
+      expect(scopeFilter(scope, "child")).not.toEqual({});
     }
   });
 
   it("matches nothing for self scope rather than matching everything", () => {
     // The single most important assertion in this file: the safe default for a scope that cannot
-    // be expressed as a filter is "no data", never "all data".
-    expect(scopeFilter(SELF_SCOPE)).toEqual({ _id: null });
+    // be expressed as a filter is "no data", never "all data". Pinned for *both* targets — self
+    // scope is not a `Site` read that happens to be empty, it is empty everywhere.
+    expect(scopeFilter(SELF_SCOPE, "child")).toEqual({ _id: null });
+    expect(scopeFilter(SELF_SCOPE, "site")).toEqual({ _id: null });
   });
 
   it("produces an empty $in for an empty site scope, which matches nothing", () => {
-    expect(scopeFilter(sitesScope([]))).toEqual({ siteId: { $in: [] } });
+    // An empty id list must narrow to zero rows rather than being treated as "no restriction".
+    // `resolveScope` returns exactly this for a supervisor with no sites, so the supervisor site
+    // board is empty rather than the whole company's.
+    expect(scopeFilter(sitesScope([]), "child")).toEqual({
+      siteId: { $in: [] },
+    });
+    expect(scopeFilter(sitesScope([]), "site")).toEqual({ _id: { $in: [] } });
   });
 
-  it("filters sites and clients by membership", () => {
-    expect(scopeFilter(sitesScope(["site-1"]))).toEqual({
+  it("filters sites and clients by membership on a child collection", () => {
+    expect(scopeFilter(sitesScope(["site-1"]), "child")).toEqual({
       siteId: { $in: ["site-1"] },
     });
-    expect(scopeFilter({ kind: "client", clientIds: ["client-2"] })).toEqual({
+    expect(
+      scopeFilter({ kind: "client", clientIds: ["client-2"] }, "child"),
+    ).toEqual({
       clientId: { $in: ["client-2"] },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Target-aware scoping
+// ---------------------------------------------------------------------------
+
+/**
+ * Every scope kind against every target, as one table.
+ *
+ * Driven off the scope *constructors* and the target literals rather than restating either, so a
+ * new `Scope` kind or a new `ScopeTarget` lands in a row that is asserted rather than skipped.
+ */
+const SCOPES_BY_KIND: { kind: Scope["kind"]; scope: Scope }[] = [
+  { kind: "organization", scope: ORGANIZATION_SCOPE },
+  { kind: "sites", scope: sitesScope(["site-1", "site-2"]) },
+  { kind: "client", scope: { kind: "client", clientIds: ["client-1"] } },
+  { kind: "self", scope: SELF_SCOPE },
+];
+
+const TARGETS: ScopeTarget[] = ["site", "child"];
+
+describe("scopeFilter() against the Site collection", () => {
+  it("narrows a site-scoped read of Site on _id, not on a field Site does not have", () => {
+    // The defect this exists for. `Site` has no `siteId` field — a site document's own id *is* the
+    // site — so the child-collection filter `{ siteId: { $in: [...] } }` matched zero sites and
+    // rendered a silently empty site board for every supervisor and site manager.
+    expect(scopeFilter(sitesScope(["site-1", "site-2"]), "site")).toEqual({
+      _id: { $in: ["site-1", "site-2"] },
+    });
+  });
+
+  it("keeps a client-scoped read of Site narrowed to that client", () => {
+    // `Site.clientId` genuinely exists, so the client filter is already correct here. Stated
+    // explicitly so a future "simplification" that reroutes client scope through the site path
+    // cannot quietly turn a client-scoped site list into a whole-organisation one.
+    expect(
+      scopeFilter({ kind: "client", clientIds: ["client-1"] }, "site"),
+    ).toEqual({
+      clientId: { $in: ["client-1"] },
+    });
+  });
+
+  it("gives an organisation-wide read of Site no predicate at all", () => {
+    expect(scopeFilter(ORGANIZATION_SCOPE, "site")).toEqual({});
+  });
+
+  it("changes only the site field when the target changes", () => {
+    // Every other (scope kind, target) pair must be byte-identical across targets. This is what
+    // "every other collection is unaffected" means, stated as a property rather than by assertion.
+    for (const { kind, scope } of SCOPES_BY_KIND) {
+      if (kind === "sites") {
+        continue;
+      }
+      expect(scopeFilter(scope, "site"), `scope "${kind}"`).toEqual(
+        scopeFilter(scope, "child"),
+      );
+    }
+  });
+});
+
+describe("scopeFilter() fail-closed properties", () => {
+  it("produces {} for organisation scope and for no other scope, on any target", () => {
+    // The cross-product form of "an empty filter means the whole tenant". Asserted over the
+    // product rather than per-scope so a target that widens cannot be introduced alongside a
+    // scope that already fails closed for the other target.
+    for (const target of TARGETS) {
+      for (const { kind, scope } of SCOPES_BY_KIND) {
+        const isEmpty = Object.keys(scopeFilter(scope, target)).length === 0;
+        expect(
+          isEmpty,
+          `${kind} × ${target} produced ${JSON.stringify(scopeFilter(scope, target))}`,
+        ).toBe(kind === "organization");
+      }
+    }
+  });
+
+  it("matches nothing for an unrecognised target, never everything", () => {
+    // The new axis of risk. A cast — a typo, a bad refactor, an untyped caller — must not fall
+    // through to "no predicate", because a filter that composes into a query as nothing at all
+    // is the worst possible outcome: it looks like a successful, correctly-scoped read.
+    const bogus = "sites" as ScopeTarget;
+    const narrowed = SCOPES_BY_KIND.filter(
+      ({ kind }) => kind !== "organization",
+    );
+
+    for (const { kind, scope } of narrowed) {
+      const filter = scopeFilter(scope, bogus);
+      expect(filter, `${kind} × unrecognised target`).toEqual({ _id: null });
+      expect(
+        Object.keys(filter).length,
+        `${kind} × unrecognised target must not be unscoped`,
+      ).toBeGreaterThan(0);
+    }
+
+    // `organization` is deliberately the exception: it is resolved *before* the target is looked
+    // at, because it is target-independent — the caller already holds the widest scope there is,
+    // so there is nothing left to narrow by, and the tenant predicate comes from `OrgFilter`
+    // (`organizationId` is required on every service read). Failing closed here would deny a
+    // legitimate organisation-wide admin access to a collection over a misspelled literal, which
+    // is an availability cost with no confidentiality benefit. This is the one place where `{}`
+    // is correct, and it is correct *because* the scope is `organization` — the same condition
+    // that governs every other target, which is what makes the guarantee composable.
+    expect(scopeFilter(ORGANIZATION_SCOPE, bogus)).toEqual({});
+  });
+
+  it("matches nothing for an unrecognised scope kind, never everything", () => {
+    // The symmetric guard on the other axis, and the reason `Scope` is a closed union: a kind the
+    // membership table has never heard of cannot resolve to an empty predicate.
+    const unknownKind = { kind: "organisation" } as unknown as Scope;
+
+    for (const target of TARGETS) {
+      expect(scopeFilter(unknownKind, target)).toEqual({ _id: null });
+    }
+  });
+
+  it("never widens a narrowed scope to match more rows than before", () => {
+    // A regression guard on the direction of every change: each filter below matches a strict
+    // subset of what `organization` matches. `sitesScope([])` in particular must stay an empty
+    // `$in` and not degrade to "all sites".
+    const scoped = SCOPES_BY_KIND.filter(({ kind }) => kind !== "organization");
+
+    for (const { kind, scope } of scoped) {
+      for (const target of TARGETS) {
+        const filter = scopeFilter(scope, target);
+        expect(
+          Object.keys(filter).length,
+          `${kind} × ${target} lost its predicate`,
+        ).toBe(1);
+      }
+    }
+
+    // The specific regression: an empty id list is "none", not "all".
+    for (const target of TARGETS) {
+      const filter = scopeFilter(sitesScope([]), target);
+      expect(filter).toEqual({
+        [target === "site" ? "_id" : "siteId"]: { $in: [] },
+      });
+    }
   });
 });
 
@@ -545,12 +695,19 @@ describe("composed guarantee", () => {
     };
 
     for (const role of ROLES) {
-      const filter = scopeFilter(resolveScope(role, contexts[role]));
-      const isUnscoped = Object.keys(filter).length === 0;
-      expect(
-        isUnscoped,
-        `${role}: hasOrgWideScope=${hasOrgWideScope(role)} but filter ${JSON.stringify(filter)}`,
-      ).toBe(hasOrgWideScope(role));
+      // Asserted for every target, not just one. The premise of this invariant is that a filter
+      // is empty iff the role's scope is the whole organisation — and `scopeFilter` takes a
+      // target, so a version of it that widened for some collection would break the invariant
+      // without changing what it says. `organization` is the only arm returning `{}` and it does
+      // so for every target, which is what keeps the premise intact.
+      for (const target of TARGETS) {
+        const filter = scopeFilter(resolveScope(role, contexts[role]), target);
+        const isUnscoped = Object.keys(filter).length === 0;
+        expect(
+          isUnscoped,
+          `${role} (${target}): hasOrgWideScope=${hasOrgWideScope(role)} but filter ${JSON.stringify(filter)}`,
+        ).toBe(hasOrgWideScope(role));
+      }
     }
   });
 });

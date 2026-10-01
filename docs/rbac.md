@@ -102,26 +102,83 @@ check. These compose:
 
 ```ts
 type Scope =
-  | { kind: "organization" }                       // whole tenant
-  | { kind: "sites"; siteIds: ObjectId[] }         // subset of sites
-  | { kind: "client"; clientId: ObjectId }         // one client
-  | { kind: "self" };                              // own records only
+  | { kind: "organization" }                    // whole tenant
+  | { kind: "sites"; siteIds: string[] }        // subset of sites
+  | { kind: "client"; clientIds: string[] }     // subset of client accounts
+  | { kind: "self" };                           // own records only
+
+type ScopeTarget = "site" | "child";
 ```
 
 Resolution:
 
 ```
-PLATFORM_ADMIN     → organization, only with explicit active org
+PLATFORM_ADMIN        → organization, only with explicit active org
 SECURITY_COMPANY_ADMIN → organization
-SUPERVISOR         → sites: [sites where supervisorIds contains user]
-SITE_MANAGER       → sites: [same]
-CLIENT_ADMIN       → client: user.clientId
-CLIENT_VIEWER      → client: user.clientId
-GUARD              → self
+SUPERVISOR            → sites: [sites where supervisorIds contains user]
+SITE_MANAGER          → sites: [same]
+CLIENT_ADMIN          → client: [user.clientId]
+CLIENT_VIEWER         → client: [user.clientId]
+GUARD                 → self
 ```
 
 A scope can only ever **narrow**. A service never widens a caller's scope to make a query
 work; if the target record falls outside scope, the request returns **404**.
+
+### Scope → filter: the scope is not enough
+
+`scopeFilter(scope, target)` in `src/lib/tenant.ts` translates a resolved scope into the Mongo
+predicate it contributes. It takes a **second, required** argument, because the scope→field
+mapping is a property of the *collection* rather than of the scope:
+
+| `target` | Collection shape | `sites` scope narrows on | `client` scope narrows on |
+| --- | --- | --- | --- |
+| `"child"` | Carries `siteId` / `clientId` as a foreign key — `Station`, `DutyAssignment`, `AttendanceRecord`, … | `siteId` | `clientId` |
+| `"site"` | The `Site` collection itself — a site document's own id *is* the site, so it has no `siteId` field | `_id` | `clientId` |
+
+| Scope kind | `"child"` | `"site"` |
+| --- | --- | --- |
+| `organization` | `{}` | `{}` |
+| `sites` | `{ siteId: { $in: siteIds } }` | `{ _id: { $in: siteIds } }` |
+| `client` | `{ clientId: { $in: clientIds } }` | `{ clientId: { $in: clientIds } }` |
+| `self` | `{ _id: null }` | `{ _id: null }` |
+| unrecognised target or scope kind | `{ _id: null }` | `{ _id: null }` |
+
+Two rules make this safe, and `src/lib/security.test.ts` holds both:
+
+1. **`{}` is produced only by `organization` scope**, in every collection. `{}` matches every
+   document, so a filter that "lost" its predicate is a full tenant leak. Every other scope kind
+   either narrows or matches nothing — `{ _id: null }` is always false, since `_id` is an ObjectId
+   and is never `null`. This includes a target or scope kind that arrives via a cast: the lookup
+   misses and resolves to `{ _id: null }`, never to an absent predicate.
+
+2. **`target` has no default.** A defaulted target would preserve the defect it exists to fix —
+   `scopeFilter(ctx.scope)` against `Site` would compile, silently match zero rows, and read as a
+   successful, correctly-scoped but empty board. Requiring it makes every call site declare which
+   collection shape it is reading, and a wrong literal is a compile error at that call site.
+
+`organization` is resolved before the target is consulted, so it is the one case where a
+misspelled `target` still yields `{}`. That is correct: the caller already holds the widest scope
+there is, the tenant predicate is supplied separately by `OrgFilter` (`organizationId` is required
+on every service read), and failing closed would deny a legitimate org-wide admin over a typo.
+
+### `supervisorIds` is resolution, not filtering
+
+`Site.supervisorIds` admits a second strategy: `{ supervisorIds: userId }`, resolving a
+supervisor's sites by assignment at read time instead of from a precomputed id list. It is
+deliberately **not** part of `scopeFilter`.
+
+Both are the *same* step — turning "this user is a supervisor" into "these site ids" — and
+`resolveScope`'s contract already fixes that step as *"siteIds must be supplied by the caller from
+the database, never from the request body"*. The difference is only whether the ids are
+materialised into a `Scope` or left as a query, which is a query-plan decision for the service
+layer that builds `AuthContext`, not a property of the filter translator. Putting it in
+`scopeFilter` would make the filter depend on a user id that is not part of `Scope` — precisely
+the optional-argument-whose-absence-changes-the-security-property shape this API avoids.
+
+Should the id list ever grow too large to materialise into `$in`, the fix is a new `Scope`
+variant resolved from `supervisorIds` in the service layer, not a special case inside
+`scopeFilter`.
 
 ### Why 404, not 403
 
@@ -185,10 +242,14 @@ Three rules follow, and `src/lib/security.test.ts` is where they are held:
    `siteId` in the query instead.
 
 2. **The two modules must not disagree.** `hasOrgWideScope(role)` is true **iff**
-   `scopeFilter(resolveScope(role, …))` is empty. The predicate lives in `permissions.ts` and
+   `scopeFilter(resolveScope(role, …), target)` is empty. The predicate lives in `permissions.ts` and
    scope resolution in `tenant.ts`; they answer the same question in two files, and the
    composed-guarantee test is the only thing stopping them drifting — the live board was
-   silently served to site-scoped roles precisely because the two disagreed. `CLIENT_ROLES`,
+   silently served to site-scoped roles precisely because the two disagreed. The equivalence
+   holds for *every* `target`, because `organization` is the only scope kind that yields `{}` and
+   it yields it regardless of collection — so the premise survives `scopeFilter` gaining a
+   target dimension, and the test asserts it for each one rather than for a single representative
+   call. `CLIENT_ROLES`,
    `SITE_SCOPED_ROLES` and `SELF_SCOPED_ROLES` in `src/constants/domain.ts`, plus
    `ORGANIZATION_SCOPED_ROLES` in `permissions.ts`, are the single source of truth for all
    three classifiers (`hasOrgWideScope`, `isClientRole`, `isSiteScopedRole`) — each classifier
