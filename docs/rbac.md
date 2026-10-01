@@ -161,6 +161,46 @@ const assignment = await createAssignment(ctx.organizationId, ctx.scope, input);
 `requirePermission` throws a typed `AuthError`, which is translated to a redirect (pages) or
 an error envelope (API). There is no code path that reaches a service without one.
 
+### Unscoped reads
+
+A page that renders **unscoped** organisation rows — no `organizationId`, `clientId` or
+`siteId` predicate narrowing them — asserts two checks, not one. `can()` answers "may this
+role do this"; `hasOrgWideScope()` answers "may these rows exist for this role". They are
+different questions and only one of them is a capability check:
+
+```ts
+// ✔ Both. dashboard/live is unscoped, so both are required.
+if (!can(role, "deployment:read") || !hasOrgWideScope(role)) redirect(homeForRole(role));
+```
+
+Asserting `can()` alone is a tenant leak rather than a missing check: `client_admin`,
+`client_viewer`, `supervisor` and `site_manager` all hold `deployment:read` — see the live
+board row in the deployment table above — and a capability check cannot distinguish a role
+scoped by *site* from a role scoped by *nothing*.
+
+Three rules follow, and `src/lib/security.test.ts` is where they are held:
+
+1. **Both checks, always.** Any page reading unscoped organisation rows asserts `can()` *and*
+   `hasOrgWideScope()`. Pages reading scoped rows call neither and narrow by `clientId` or
+   `siteId` in the query instead.
+
+2. **The two modules must not disagree.** `hasOrgWideScope(role)` is true **iff**
+   `scopeFilter(resolveScope(role, …))` is empty. The predicate lives in `permissions.ts` and
+   scope resolution in `tenant.ts`; they answer the same question in two files, and the
+   composed-guarantee test is the only thing stopping them drifting — the live board was
+   silently served to site-scoped roles precisely because the two disagreed. `CLIENT_ROLES`,
+   `SITE_SCOPED_ROLES` and `SELF_SCOPED_ROLES` in `src/constants/domain.ts`, plus
+   `ORGANIZATION_SCOPED_ROLES` in `permissions.ts`, are the single source of truth for all
+   three classifiers (`hasOrgWideScope`, `isClientRole`, `isSiteScopedRole`) — each classifier
+   reads its bucket rather than restating the role literals. The four buckets partition `ROLES`
+   exactly once each, and `ORGANIZATION_SCOPED_ROLES` is an **allowlist** so that a role added
+   to `ROLES` without being classified is least-privilege rather than org-wide.
+
+3. **Site-scoped roles get the scoped board, not a redirect.** A `supervisor` or
+   `site_manager` is redirected off an *unscoped* surface, but where the surface reads through
+   the caller's scope filter they are entitled to the rows. Narrowing is the control; denying
+   the page outright would be a defect in its own right.
+
 ---
 
 ## API authorisation pattern

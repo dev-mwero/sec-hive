@@ -9,7 +9,7 @@
  * See docs/rbac.md.
  */
 
-import { CLIENT_ROLES, type Role, SELF_SCOPED_ROLES } from "@/constants/domain";
+import { CLIENT_ROLES, type Role, SITE_SCOPED_ROLES } from "@/constants/domain";
 
 export const PERMISSIONS = [
   "users:read",
@@ -157,20 +157,43 @@ export const ROLE_PERMISSIONS: Record<Role, readonly ScopedGrant[]> = {
 // ---------------------------------------------------------------------------
 
 /**
+ * The only roles whose scope is the whole organisation. Allowlist, not a chain of negations:
+ * a role added to ROLES without being classified here must NOT inherit the whole company.
+ *
+ * `resolveScope` in `tenant.ts` independently decides scope per role, so these two can drift
+ * apart. They must stay in agreement — see `hasOrgWideScope` and `src/lib/security.test.ts`.
+ * The allowlist is the half that is enforced, so it is written as an allowlist: the previous
+ * `!CLIENT_ROLES.includes(role) && !SELF_SCOPED_ROLES.includes(role)` form never consulted
+ * `SITE_SCOPED_ROLES`, and so classified every non-client, non-guard role — `supervisor` and
+ * `site_manager` included — as organisation-wide.
+ */
+export const ORGANIZATION_SCOPED_ROLES: readonly Role[] = [
+  "platform_admin",
+  "security_company_admin",
+];
+
+/**
  * True when a role's *scope* covers the whole organisation rather than a slice of it.
+ *
+ * **Invariant:** `hasOrgWideScope(role)` is true **iff** `scopeFilter(resolveScope(role, …))`
+ * is empty. `resolveScope` and `scopeFilter` live in `tenant.ts` and are referenced here rather
+ * than imported — `tenant.ts` already pulls `Role` from `constants/domain`, so importing back
+ * would close an import cycle. `src/lib/security.test.ts` is what actually holds the two modules
+ * to this invariant.
  *
  * Separate from `can()` on purpose, because permission and scope answer different questions and a
  * capability check cannot tell them apart. Client roles are granted `deployment:read` — a client
  * legitimately needs to see guards at their own buildings — but that grant is scoped to their own
  * `clientId`. Rendering the company's unscoped deployment board to them would be a tenant leak even
- * though `can(role, "deployment:read")` returned true.
+ * though `can(role, "deployment:read")` returned true. The same argument applies to `supervisor`
+ * and `site_manager`, who hold `deployment:read` against their *assigned* sites only.
  *
  * So any page that reads *unscoped* rows must assert both: the capability **and** org-wide scope.
  * Pages that read scoped rows should not call this at all, and instead narrow by `clientId` in the
  * query.
  */
 export function hasOrgWideScope(role: Role): boolean {
-  return !CLIENT_ROLES.includes(role) && !SELF_SCOPED_ROLES.includes(role);
+  return ORGANIZATION_SCOPED_ROLES.includes(role);
 }
 
 /**
@@ -195,11 +218,11 @@ export function canAny(
 }
 
 export function isClientRole(role: Role): boolean {
-  return role === "client_admin" || role === "client_viewer";
+  return CLIENT_ROLES.includes(role);
 }
 
 export function isSiteScopedRole(role: Role): boolean {
-  return role === "supervisor" || role === "site_manager";
+  return SITE_SCOPED_ROLES.includes(role);
 }
 
 /**
