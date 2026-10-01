@@ -9,7 +9,12 @@
  * See docs/rbac.md.
  */
 
-import { CLIENT_ROLES, type Role, SITE_SCOPED_ROLES } from "@/constants/domain";
+import {
+  CLIENT_ROLES,
+  type Role,
+  SELF_SCOPED_ROLES,
+  SITE_SCOPED_ROLES,
+} from "@/constants/domain";
 
 export const PERMISSIONS = [
   "users:read",
@@ -223,6 +228,27 @@ export function isClientRole(role: Role): boolean {
 
 export function isSiteScopedRole(role: Role): boolean {
   return SITE_SCOPED_ROLES.includes(role);
+}
+
+/**
+ * True when a role's scope is its own records and nothing else — `guard`, currently.
+ *
+ * This exists because "is this caller a guard" is a question `can()` cannot answer. `attendance:checkin`
+ * is the capability that makes `/my-duty` renderable, and `platform_admin` and `security_company_admin`
+ * hold it the moment they hold `ALL`, so a capability check on that page admits the two roles with
+ * the widest scope in the product onto a screen shaped as *my* duty — one specific guard's post,
+ * shift and check-in button.
+ *
+ * The grant is not the defect; the gate is. An org-wide admin is entitled to every row the duty card
+ * would show, so this is not a leak, and it is not a reason to remove `attendance:checkin` from
+ * `ALL` — that permission answers "may this role record a check-in", which is a different question
+ * from "is this page somebody's own duty". It is here so a page that renders the *caller's* records
+ * can ask in the shape that answers it: scope, not capability. `SELF_SCOPED_ROLES` is read rather
+ * than a role literal re-spelled, so a role classified as self-scoped in `constants/domain.ts`
+ * inherits the answer and an unclassified one is not silently granted it.
+ */
+export function isSelfScopedRole(role: Role): boolean {
+  return SELF_SCOPED_ROLES.includes(role);
 }
 
 /**

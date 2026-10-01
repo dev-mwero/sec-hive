@@ -28,6 +28,8 @@ import {
 import {
   can,
   hasOrgWideScope,
+  isClientRole,
+  isSelfScopedRole,
   ORGANIZATION_SCOPED_ROLES,
 } from "@/lib/permissions";
 
@@ -71,21 +73,26 @@ function gatePortal(role: Role, session: SessionShape): GateResult {
 }
 
 function gateMyDuty(role: Role, _session: SessionShape): GateResult {
-  // Mirrors: src/app/(app)/my-duty/page.tsx lines ~55-75
-  // Requires: can(role,"attendance:checkin") else safeHomeForRole(role,"/my-duty")
-  if (can(role, "attendance:checkin")) {
+  // Mirrors: src/app/(app)/my-duty/page.tsx — the two-check gate, not the bare capability
+  // Requires: can(role,"attendance:checkin") AND isSelfScopedRole(role)
+  // else safeHomeForRole(role,"/my-duty")
+  // The second check is the fix: `ALL` includes `attendance:checkin`, so a capability check alone
+  // admitted platform_admin and security_company_admin onto a guard's own duty card.
+  if (can(role, "attendance:checkin") && isSelfScopedRole(role)) {
     return "render";
   }
   return safeHomeForRole(role, "/my-duty");
 }
 
 function gateSites(role: Role, _session: SessionShape): GateResult {
-  // Mirrors: src/app/(app)/sites/page.tsx lines ~40-65
-  // Requires: can(role,"sites:read") else homeForRole(role) (no org-wide scope check)
-  if (can(role, "sites:read")) {
+  // Mirrors: src/app/(app)/sites/page.tsx
+  // Requires: !isClientRole(role) AND can(role,"sites:read") (no org-wide scope check — this is a
+  // scoped page), else safeHomeForRole(role,"/sites"). `safeHomeForRole` rather than `homeForRole`
+  // because this page *is* the home of supervisor and site_manager.
+  if (!isClientRole(role) && can(role, "sites:read")) {
     return "render";
   }
-  return homeForRole(role);
+  return safeHomeForRole(role, "/sites");
 }
 
 function gateNoAccess(_role: Role, _session: SessionShape): GateResult {
@@ -273,6 +280,155 @@ describe("Redirect graph invariants", () => {
       for (const role of ROLES) {
         const isOrgWide = hasOrgWideScope(role);
         expect(isOrgWide).toBe(ORGANIZATION_SCOPED_ROLES_SET.has(role));
+      }
+    });
+  });
+
+  describe("Self-scoped and company surfaces", () => {
+    // `/dashboard` and `/dashboard/live` gate on a *permission the whole product shares*. These two
+    // gate on a permission or a class that only part of it should pass, and the property is stated
+    // per surface rather than as a general rule, because "which roles may open this page" is a
+    // decision each page makes about itself.
+
+    it("renders /my-duty only for a self-scoped role", () => {
+      // The defect: `attendance:checkin` sits inside `ALL`, so `platform_admin` and
+      // `security_company_admin` held it and a capability-only gate rendered a guard's duty card to
+      // the two roles with the widest scope in the product. The page shows one specific guard's
+      // post, shift and check-in button — an org-wide admin reading "your post" off a card about
+      // somebody else is a page answering a question its reader cannot have asked.
+      //
+      // Not a leak, and the grant stays: the permission answers "may this role record a check-in",
+      // which a company admin legitimately may. The *gate* narrows, on scope.
+      const session: SessionShape = { clientId: "client-1" };
+
+      for (const role of ROLES) {
+        expect(
+          GATES["/my-duty"](role, session) === "render",
+          `/my-duty rendering for ${role} must match isSelfScopedRole(${role})`,
+        ).toBe(isSelfScopedRole(role));
+      }
+    });
+
+    it("keeps the org-wide roles off /my-duty even though ALL grants them check-in", () => {
+      // Named explicitly rather than left to the sweep above, because the fix is *not* to remove
+      // the grant: if someone re-tightened `ALL`, or added `attendance:checkin` to it deliberately
+      // for another surface, this test would still fail — which is the point. The gate is what must
+      // hold, and this is the assertion that it does.
+      const session: SessionShape = { clientId: "client-1" };
+
+      for (const role of ORGANIZATION_SCOPED_ROLES) {
+        expect(
+          can(role, "attendance:checkin"),
+          `${role} is expected to hold attendance:checkin via ALL`,
+        ).toBe(true);
+        expect(
+          GATES["/my-duty"](role, session),
+          `${role} must not be served a guard's own duty card`,
+        ).not.toBe("render");
+      }
+    });
+
+    it("renders /sites for no client role, although every client role holds sites:read", () => {
+      // `CLIENT_NAV_SECTIONS` hides the nav item from a client, which is a convenience and not a
+      // gate: the route was still reachable by URL. Their own buildings are a portal read narrowed
+      // by `clientId`; this board is the company's, narrowed by site assignment.
+      const session: SessionShape = { clientId: "client-1" };
+
+      for (const role of CLIENT_ROLES) {
+        expect(
+          can(role, "sites:read"),
+          `${role} is expected to hold sites:read — the point of the test`,
+        ).toBe(true);
+        expect(
+          GATES["/sites"](role, session),
+          `/sites must not render for client role ${role}`,
+        ).not.toBe("render");
+      }
+    });
+
+    it("renders /sites for every non-client role that holds sites:read, and for no other", () => {
+      // Stated positively so the gate cannot harden into something that excludes a role this page
+      // is the home of. `supervisor` and `site_manager` are sent here by `homeForRole()`; the guard
+      // is the one non-client role that holds neither the class nor the permission, and is answered
+      // by its own duty card.
+      const session: SessionShape = { clientId: "client-1" };
+
+      for (const role of ROLES) {
+        if (CLIENT_ROLES_SET.has(role)) {
+          continue;
+        }
+        expect(
+          GATES["/sites"](role, session) === "render",
+          `/sites rendering for ${role} must match can(${role},"sites:read")`,
+        ).toBe(can(role, "sites:read"));
+      }
+
+      // The two roles `homeForRole()` names this page for, asserted by name: they are the reason the
+      // gate cannot become a company-admin-only surface, and the reason its redirect has to go
+      // through `safeHomeForRole`.
+      for (const role of SITE_SCOPED_ROLES) {
+        expect(homeForRole(role)).toBe("/sites");
+        expect(
+          GATES["/sites"](role, session),
+          `/sites must render for ${role}`,
+        ).toBe("render");
+      }
+    });
+
+    it("sends a client refused at /sites to their portal, not to the terminal screen", () => {
+      // The destination is half the control. A client who typed the company URL should land on
+      // something they can use — `NO_ACCESS_ROUTE` would be safe but would be a worse product than
+      // the gate it replaced, and it is the answer `safeHomeForRole` exists to avoid choosing.
+      for (const role of CLIENT_ROLES) {
+        expect(GATES["/sites"](role, { clientId: "client-1" })).toBe("/portal");
+      }
+    });
+
+    it("never answers a page with the page itself, from any gate", () => {
+      // The loop invariant, asserted on the modelled graph rather than on `safeHomeForRole` alone,
+      // so a gate that reaches for `homeForRole` — or for a hardcoded path — is caught here. The
+      // live example was `/portal` → `/dashboard` → `homeForRole()` → `/portal`.
+      const sessions: SessionShape[] = [
+        { clientId: "client-1" },
+        { clientId: null },
+      ];
+
+      for (const role of ROLES) {
+        for (const session of sessions) {
+          for (const [path, gate] of Object.entries(GATES)) {
+            const res = gate(role, session);
+            if (res === "render") {
+              continue;
+            }
+            expect(res, `${path} redirected ${role} to itself`).not.toBe(path);
+          }
+        }
+      }
+    });
+
+    it("redirects only to a path the graph models", () => {
+      // A redirect to an unmodelled path is not a loop, it is worse: the test suite cannot see where
+      // the caller ends up, so the loop-freedom proof above would be reasoning about a graph with a
+      // hole in it. Every destination a gate can produce is therefore asserted to be modelled.
+      const sessions: SessionShape[] = [
+        { clientId: "client-1" },
+        { clientId: null },
+      ];
+      const modelled = Object.keys(GATES);
+
+      for (const role of ROLES) {
+        for (const session of sessions) {
+          for (const [path, gate] of Object.entries(GATES)) {
+            const res = gate(role, session);
+            if (res === "render") {
+              continue;
+            }
+            expect(
+              modelled,
+              `${path} redirected ${role} to unmodelled ${res}`,
+            ).toContain(res);
+          }
+        }
       }
     });
   });

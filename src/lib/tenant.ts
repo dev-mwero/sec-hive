@@ -88,10 +88,17 @@ const NO_MATCH: Record<string, unknown> = Object.freeze({ _id: null });
  * `Site` through the child-collection filter therefore matches zero rows: fail-closed rather than
  * a leak, but a silently empty site board, which is exactly the sort of result that later gets
  * "fixed" by loosening the filter.
+ *
+ * Each member exists for one concrete collection that the `"child"` shape reads wrongly. A target is
+ * not a category to grow on speculation — it is the answer to "which document's own identity is
+ * this scope naming?", and a collection whose identity field the scope cannot name belongs under
+ * `"child"` with the honest `null` in the table below rather than in a new member here.
  */
 export type ScopeTarget =
   /** The `Site` collection itself: a site is its own scope member, so membership lives in `_id`. */
   | "site"
+  /** The `Client` collection itself — the same shape one link up the chain, and the same defect. */
+  | "client"
   /** A collection that carries `siteId` / `clientId` as a foreign key (`Station`, `DutyAssignment`, `AttendanceRecord`, …). */
   | "child";
 
@@ -101,14 +108,31 @@ type MembershipScopedKind = Extract<Scope["kind"], "sites" | "client">;
 /**
  * The field a scope's membership list is stored in, per target.
  *
- * `client` is `"clientId"` for *both* targets because `Site.clientId` genuinely exists, so a
- * client-scoped read of `Site` stays client-narrowed. A `null` value would mean "this collection
- * cannot express that scope at all" — an unrepresentable scope matches nothing, it is never
- * silently unscoped. The `satisfies` clause makes adding a `ScopeTarget` or a membership scope
- * kind without deciding its field a compile error rather than a silently-empty query.
+ * A `client` scope narrows on `clientId` for the `site` and `child` targets alike, because
+ * `Site.clientId` genuinely exists, so a client-scoped read of `Site` stays client-narrowed. A
+ * `null` value means "this collection cannot express that scope at all" — an unrepresentable scope
+ * matches nothing, it is never silently unscoped. The `satisfies` clause makes adding a
+ * `ScopeTarget` or a membership scope kind without deciding its field a compile error rather than a
+ * silently-empty query.
+ *
+ * The `client` row is `"site"`'s twin, and it exists because `Client` carries the same defect
+ * `Site` had: it has an `id`, not a `clientId`. A client document's own id *is* the client the
+ * scope names, so a client-scoped read narrows on `_id` — exactly as a site-scoped read of `Site`
+ * does. Left under `"child"` it would have narrowed on a `clientId` field `Client` does not have,
+ * matched zero rows, and rendered a silently empty client list on the client portal, which reads
+ * this collection.
+ *
+ * Its `sites` cell is `null`, and that is a real answer rather than an omission. The
+ * site→client relation is stored on `Site` (`Site.clientId`), not on `Client`, so a client document
+ * carries no site membership to narrow by — a supervisor's site list cannot be resolved against
+ * the `Client` collection at all. The alternative would be a cross-collection lookup, which
+ * `scopeFilter` is a single-predicate translator and must not become (docs/rbac.md,
+ * "`supervisorIds` is resolution, not filtering"). Unrepresentable therefore means *no rows*, so
+ * the answer fails closed rather than quietly widening to every client the company serves.
  */
 const SCOPE_MEMBERSHIP_FIELD = {
   site: { sites: "_id", client: "clientId" },
+  client: { sites: null, client: "_id" },
   child: { sites: "siteId", client: "clientId" },
 } as const satisfies Record<
   ScopeTarget,
@@ -151,7 +175,7 @@ function membershipField(
  * `organization` is the only arm that returns `{}`, and it is target-independent: every other kind
  * either narrows or matches nothing, in every collection. That is what keeps the composed
  * guarantee `hasOrgWideScope(role)` ⟺ `scopeFilter(resolveScope(role, …), target)` is empty true
- * for both targets rather than true by coincidence for one of them.
+ * for every target rather than true by coincidence for one of them.
  */
 export function scopeFilter(
   scope: Scope,

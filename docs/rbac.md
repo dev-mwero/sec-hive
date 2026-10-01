@@ -107,7 +107,7 @@ type Scope =
   | { kind: "client"; clientIds: string[] }     // subset of client accounts
   | { kind: "self" };                           // own records only
 
-type ScopeTarget = "site" | "child";
+type ScopeTarget = "site" | "client" | "child";
 ```
 
 Resolution:
@@ -135,14 +135,22 @@ mapping is a property of the *collection* rather than of the scope:
 | --- | --- | --- | --- |
 | `"child"` | Carries `siteId` / `clientId` as a foreign key — `Station`, `DutyAssignment`, `AttendanceRecord`, … | `siteId` | `clientId` |
 | `"site"` | The `Site` collection itself — a site document's own id *is* the site, so it has no `siteId` field | `_id` | `clientId` |
+| `"client"` | The `Client` collection itself — a client document's own id *is* the client, so it has no `clientId` field, and the site→client relation lives on `Site`, so it carries no site membership | `{ _id: null }` — unrepresentable, matches nothing | `_id` |
 
-| Scope kind | `"child"` | `"site"` |
-| --- | --- | --- |
-| `organization` | `{}` | `{}` |
-| `sites` | `{ siteId: { $in: siteIds } }` | `{ _id: { $in: siteIds } }` |
-| `client` | `{ clientId: { $in: clientIds } }` | `{ clientId: { $in: clientIds } }` |
-| `self` | `{ _id: null }` | `{ _id: null }` |
-| unrecognised target or scope kind | `{ _id: null }` | `{ _id: null }` |
+A `target` exists for a collection whose *own* identity is what the scope names, and for no other
+reason: `Client` has the same defect `Site` had, one link up the chain, and a client-scoped read of
+`Client` narrows on `_id` exactly as a site-scoped read of `Site` does. A `null` cell means the
+collection cannot express that scope at all — the site→client relation is stored on `Site`, so a
+supervisor's site list cannot be resolved against `Client` without a cross-collection lookup, which
+is resolution rather than filtering. Unrepresentable therefore matches nothing.
+
+| Scope kind | `"child"` | `"site"` | `"client"` |
+| --- | --- | --- | --- |
+| `organization` | `{}` | `{}` | `{}` |
+| `sites` | `{ siteId: { $in: siteIds } }` | `{ _id: { $in: siteIds } }` | `{ _id: null }` |
+| `client` | `{ clientId: { $in: clientIds } }` | `{ clientId: { $in: clientIds } }` | `{ _id: { $in: clientIds } }` |
+| `self` | `{ _id: null }` | `{ _id: null }` | `{ _id: null }` |
+| unrecognised target or scope kind | `{ _id: null }` | `{ _id: null }` | `{ _id: null }` |
 
 Two rules make this safe, and `src/lib/security.test.ts` holds both:
 
@@ -307,7 +315,7 @@ is one-to-one and written only by the service layer.
 
 ## Test matrix
 
-`src/lib/permissions.test.ts` and `src/server/**/*.test.ts` cover:
+`src/lib/security.test.ts` and `src/server/**/*.test.ts` cover:
 
 - every role × every permission pair against the matrix,
 - `SiteManager` and `Supervisor` cannot write outside their sites,

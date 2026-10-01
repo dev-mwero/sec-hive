@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DASHBOARD_POLL_INTERVAL_MS } from "@/constants/domain";
 import { safeHomeForRole } from "@/constants/navigation";
 import { dummyGuardDuty } from "@/data/dummy";
-import { can } from "@/lib/permissions";
+import { can, isSelfScopedRole } from "@/lib/permissions";
 import { formatHHMM, timeToMinutes } from "@/lib/time";
 import { getSession } from "@/server/auth/session";
 
@@ -29,8 +29,9 @@ import { getSession } from "@/server/auth/session";
  * - **No aggregates.** A guard does not need a coverage percentage. They need their post, their
  *   hours, and their attendance state.
  *
- * A company supervisor has no `attendance:checkin` permission of their own, so this page
- * redirects rather than rendering an inert card.
+ * A company supervisor has no `attendance:checkin` permission of their own, and a company admin has
+ * it only by way of `ALL` — so this page redirects for both, rather than rendering an inert card or
+ * somebody else's.
  */
 export default async function MyDutyPage() {
   const session = await getSession();
@@ -41,11 +42,28 @@ export default async function MyDutyPage() {
 
   const { user } = session;
 
+  // Both checks are required, and this is the same shape as `/dashboard` and `/dashboard/live`.
+  //
   // Not a bare `/dashboard`. A supervisor is redirected here for exactly the reason a guard is not,
   // and `/dashboard` answers a supervisor by calling `homeForRole` — so the hop has to be made
   // through the same mapping, and through the variant that refuses to send a role to the page doing
   // the sending. Without that, "send the caller home" is a loop for any role homed here.
-  if (!can(user.role, "attendance:checkin")) {
+  //
+  // `attendance:checkin` alone is an over-broad gate. `platform_admin` and `security_company_admin`
+  // hold `ALL`, so they hold it, and the page rendered *their* duty card — one guard's post, shift
+  // and check-in button — to the two roles with the widest scope in the product. That is not a leak:
+  // they are entitled to every row it shows. It is a page that is shaped as *my* duty, and an
+  // org-wide admin reading "your post" off a card about somebody else is a page answering a question
+  // its reader cannot have asked.
+  //
+  // The grant is deliberately not withdrawn from `ALL` — it answers "may this role record a
+  // check-in", which a company admin legitimately may, and removing it would make the matrix lie
+  // about that. The gate is what narrows, and it narrows on *scope*: `isSelfScopedRole` is the
+  // question "are these the caller's own records", which is what this page is for. `guard` is the
+  // only member of `SELF_SCOPED_ROLES`, and reading the bucket rather than the role literal means a
+  // role classified as self-scoped in `constants/domain.ts` inherits the gate instead of being
+  // added to it by hand.
+  if (!can(user.role, "attendance:checkin") || !isSelfScopedRole(user.role)) {
     redirect(safeHomeForRole(user.role, "/my-duty"));
   }
 

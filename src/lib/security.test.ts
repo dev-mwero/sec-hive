@@ -7,7 +7,7 @@
  * that quietly widens someone's access.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   CLIENT_ROLES,
@@ -23,6 +23,7 @@ import {
   canWriteDeployment,
   hasOrgWideScope,
   isClientRole,
+  isSelfScopedRole,
   isSiteScopedRole,
   ORGANIZATION_SCOPED_ROLES,
   PERMISSION_LABELS,
@@ -43,6 +44,7 @@ import {
   scopeFilter,
   sitesScope,
 } from "@/lib/tenant";
+import type { Client, Site, Station } from "@/types/domain";
 
 /**
  * The roles whose data is the whole organisation. Deliberately *not* the same list as
@@ -277,6 +279,7 @@ describe("hasOrgWideScope()", () => {
     expect(hasOrgWideScope(unclassified)).toBe(false);
     expect(isClientRole(unclassified)).toBe(false);
     expect(isSiteScopedRole(unclassified)).toBe(false);
+    expect(isSelfScopedRole(unclassified)).toBe(false);
   });
 });
 
@@ -348,6 +351,32 @@ describe("role classifiers", () => {
       expect(isSiteScopedRole(role)).toBe(true);
     }
     expect(isSiteScopedRole("security_company_admin")).toBe(false);
+  });
+
+  it("identifies self-scoped roles, which no capability check can express", () => {
+    // `guard` is the only member today, and the value of the classifier is that a *second* member
+    // would answer correctly without the test being amended. It reads `SELF_SCOPED_ROLES` rather
+    // than re-spelling `role === "guard"` so that the bucket in `constants/domain.ts` stays the
+    // single source of truth — the same bargain the other two classifiers make.
+    for (const role of SELF_SCOPED_ROLES) {
+      expect(isSelfScopedRole(role)).toBe(true);
+    }
+
+    for (const role of ROLES) {
+      expect(isSelfScopedRole(role), `${role} self-scoped classification`).toBe(
+        SELF_SCOPED_ROLES.includes(role),
+      );
+    }
+
+    // Stated as the reason the classifier exists: `ALL` grants `attendance:checkin` to the two
+    // org-wide roles, so the capability that makes `/my-duty` renderable cannot also be the check
+    // that decides who the page is for. If `ALL` ever stops granting it, this fails and the page's
+    // second gate still holds — which is the arrangement this classifier supports.
+    for (const role of COMPANY_ROLES) {
+      expect(can(role, "attendance:checkin")).toBe(true);
+      expect(isSelfScopedRole(role)).toBe(false);
+    }
+    expect(can("guard", "attendance:checkin")).toBe(true);
   });
 
   it("partitions every role into exactly one scope bucket", () => {
@@ -516,7 +545,45 @@ const SCOPES_BY_KIND: { kind: Scope["kind"]; scope: Scope }[] = [
   { kind: "self", scope: SELF_SCOPE },
 ];
 
-const TARGETS: ScopeTarget[] = ["site", "child"];
+const TARGETS: ScopeTarget[] = ["site", "client", "child"];
+
+/**
+ * Every (scope kind × target) cell, as the exact filter it has to produce.
+ *
+ * Typed as a total `Record` over both axes rather than built up as cases are found, so a new
+ * `Scope` kind or a new `ScopeTarget` is a **compile error** until its cell is decided here. That
+ * is the same bargain `SCOPE_MEMBERSHIP_FIELD` makes with its `satisfies` clause, restated on the
+ * test side: the table in `tenant.ts` is private, so without this the one place a new collection
+ * shape could be introduced without anyone stating what it does to every scope kind would be the
+ * test suite.
+ *
+ * The cells are written out rather than derived from the production table on purpose. A derived
+ * expectation would re-implement `scopeFilter` and therefore agree with it whatever it did, which
+ * is the opposite of the point — the two unrepresentable cells (`sites × client`, and every `self`
+ * cell) are where a derivation would be least able to notice a change.
+ */
+const EXPECTED_FILTER_BY_KIND: Record<
+  Scope["kind"],
+  Record<ScopeTarget, Record<string, unknown>>
+> = {
+  // `organization` is resolved before the target is consulted, so it is `{}` in all three.
+  organization: { site: {}, client: {}, child: {} },
+  sites: {
+    // A site document *is* its own scope member; a client document has no site membership to store;
+    // a child carries the relation as a foreign key.
+    site: { _id: { $in: ["site-1", "site-2"] } },
+    client: { _id: null },
+    child: { siteId: { $in: ["site-1", "site-2"] } },
+  },
+  client: {
+    // `Site.clientId` and the child's `clientId` both genuinely exist; `Client` has only `_id`.
+    site: { clientId: { $in: ["client-1"] } },
+    client: { _id: { $in: ["client-1"] } },
+    child: { clientId: { $in: ["client-1"] } },
+  },
+  // Self scope is not a collection-specific narrowing. It is empty everywhere.
+  self: { site: { _id: null }, client: { _id: null }, child: { _id: null } },
+};
 
 describe("scopeFilter() against the Site collection", () => {
   it("narrows a site-scoped read of Site on _id, not on a field Site does not have", () => {
@@ -543,16 +610,104 @@ describe("scopeFilter() against the Site collection", () => {
     expect(scopeFilter(ORGANIZATION_SCOPE, "site")).toEqual({});
   });
 
-  it("changes only the site field when the target changes", () => {
-    // Every other (scope kind, target) pair must be byte-identical across targets. This is what
-    // "every other collection is unaffected" means, stated as a property rather than by assertion.
+  it("narrows a sites scope on a different field for each target, never on a shared one", () => {
+    // The property the `target` parameter exists for, restated across all three targets now that
+    // a sites scope has three different answers: membership in `_id` where the document is its own
+    // scope member, in a foreign key where the relation is stored on the child, and not at all
+    // where the collection cannot express it.
+    expect(scopeFilter(sitesScope(["site-1"]), "site")).toEqual({
+      _id: { $in: ["site-1"] },
+    });
+    expect(scopeFilter(sitesScope(["site-1"]), "child")).toEqual({
+      siteId: { $in: ["site-1"] },
+    });
+    expect(scopeFilter(sitesScope(["site-1"]), "client")).toEqual({
+      _id: null,
+    });
+  });
+});
+
+describe("scopeFilter() against the Client collection", () => {
+  it("narrows a client-scoped read of Client on _id, not on a field Client does not have", () => {
+    // The same defect `Site` had, one link up the chain. `Client` has `id`, not `clientId`, so the
+    // child-collection filter `{ clientId: { $in: [...] } }` matched zero clients and rendered a
+    // silently empty client list on the client portal, which reads this collection. Fail-closed,
+    // so no leak — but a board that is empty for the wrong reason, and the sort of result that
+    // later gets "fixed" by loosening the filter.
+    expect(
+      scopeFilter({ kind: "client", clientIds: ["client-1"] }, "client"),
+    ).toEqual({
+      _id: { $in: ["client-1"] },
+    });
+  });
+
+  it("narrows on _id because Client has no clientId field of its own", () => {
+    // The premise the row above rests on, asserted at the type level as well as at the value level.
+    // Type-level because the failure this guards is a *schema* change: if `Client` ever grows a
+    // `clientId` (say, a denormalised primary site), the correct narrowing becomes a question this
+    // table has to be re-asked, and the assertion is what says so at build time. Value-level
+    // because a type assertion alone would still pass against a table that had already drifted to
+    // some other field `Client` also happens to carry.
+    expectTypeOf<Client>().toHaveProperty("id");
+    expectTypeOf<Client>().not.toHaveProperty("clientId");
+
+    expect(
+      Object.keys(
+        scopeFilter({ kind: "client", clientIds: ["client-1"] }, "client"),
+      ),
+      "a client-scoped read of Client must narrow on _id",
+    ).toEqual(["_id"]);
+  });
+
+  it("matches nothing for a site-scoped read of Client rather than every client", () => {
+    // The unrepresentable cell, and the reason a site-scoped caller must never be answered from
+    // this collection. The site→client relation lives on `Site` (`Site.clientId`), not on `Client`,
+    // so a client document carries no site membership. Resolving it here would mean a
+    // cross-collection lookup, which `scopeFilter` must not become: it translates one scope into
+    // one predicate, and `supervisorIds`-style resolution belongs in the service layer that builds
+    // `AuthContext` (docs/rbac.md, "`supervisorIds` is resolution, not filtering"). Matching every
+    // client instead would hand a supervisor the whole customer list.
+    expect(scopeFilter(sitesScope(["site-1", "site-2"]), "client")).toEqual({
+      _id: null,
+    });
+  });
+
+  it("gives an organisation-wide read of Client no predicate at all", () => {
+    // Stated for the new target as it was for `site`, because the composed guarantee
+    // `hasOrgWideScope(role)` ⟺ empty filter is only true while every target agrees.
+    expect(scopeFilter(ORGANIZATION_SCOPE, "client")).toEqual({});
+  });
+
+  it("keeps a self-scoped read of Client matching nothing", () => {
+    expect(scopeFilter(SELF_SCOPE, "client")).toEqual({ _id: null });
+  });
+
+  it("does not fall back to the child shape's field for a collection that lacks it", () => {
+    // `Station` and `Client` are opposite cases and the pair is worth stating together: `Station`
+    // genuinely carries `siteId` but no `clientId`, and `Client` genuinely carries neither foreign
+    // key. A client-scoped read of `Station` is therefore also unrepresentable — still expressed on
+    // `clientId` today, because nothing reads `Station` through a client scope yet. This test does
+    // not change that (a target per collection is not added on speculation); it records that the
+    // residue exists, so the day a client-scoped station read is written the two are fixed together
+    // rather than the filter being loosened.
+    expectTypeOf<Station>().toHaveProperty("siteId");
+    expectTypeOf<Station>().not.toHaveProperty("clientId");
+    expectTypeOf<Site>().toHaveProperty("clientId");
+  });
+});
+
+describe("scopeFilter() across every (kind × target) cell", () => {
+  it("produces exactly the documented filter in every cell of the matrix", () => {
+    // The cross-product as one table. The unrepresentable cells are asserted to be `{ _id: null }`
+    // explicitly rather than merely "not `{}`" below, because a cell that silently acquired *some*
+    // other predicate — a real field, a real `$in`, an empty object under a different key — would
+    // satisfy every other assertion in this file while matching the wrong rows.
     for (const { kind, scope } of SCOPES_BY_KIND) {
-      if (kind === "sites") {
-        continue;
+      for (const target of TARGETS) {
+        expect(scopeFilter(scope, target), `${kind} × ${target}`).toEqual(
+          EXPECTED_FILTER_BY_KIND[kind][target],
+        );
       }
-      expect(scopeFilter(scope, "site"), `scope "${kind}"`).toEqual(
-        scopeFilter(scope, "child"),
-      );
     }
   });
 });
@@ -628,12 +783,19 @@ describe("scopeFilter() fail-closed properties", () => {
       }
     }
 
-    // The specific regression: an empty id list is "none", not "all".
+    // The specific regression: an empty id list is "none", not "all" — on every target that can
+    // express the scope at all, and still "none" rather than "all" on the one that cannot. The
+    // `sites × client` cell is the second half of that: it must not degrade to "every client".
     for (const target of TARGETS) {
       const filter = scopeFilter(sitesScope([]), target);
-      expect(filter).toEqual({
-        [target === "site" ? "_id" : "siteId"]: { $in: [] },
-      });
+      expect(Object.keys(filter), `${target} lost its predicate`).toHaveLength(
+        1,
+      );
+      expect(filter, `${target} × empty site scope`).toEqual(
+        target === "client"
+          ? { _id: null }
+          : { [target === "site" ? "_id" : "siteId"]: { $in: [] } },
+      );
     }
   });
 });
