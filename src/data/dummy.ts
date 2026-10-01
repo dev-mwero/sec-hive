@@ -20,6 +20,7 @@ import type {
   CoverageStatus,
   Role,
 } from "@/constants/domain";
+import { ASSIGNMENT_STATUS_LABELS } from "@/constants/domain";
 import {
   formatShiftWindow,
   materialiseShiftWindow,
@@ -38,6 +39,11 @@ import type {
   Station,
   User,
 } from "@/types/domain";
+
+// Declared above `DUMMY` on purpose. `guard()` is called while the `DUMMY` literal is being
+// evaluated, so a `let` below this point would be in its temporal dead zone and throw only at
+// runtime — which `tsc` cannot catch and `next dev` does not reliably surface.
+let guardSequence = 0;
 
 export const DUMMY = {
   organization: {
@@ -256,6 +262,24 @@ const deploymentSpec: {
     checkInMinutes: 361,
     checkOutMinutes: 700,
   },
+  // John Mwangi (guard-1) is the demo guard, so he gets a whole day rather than a single row:
+  // a finished morning shift, the shift he is on now, and an overnight he has not started. That
+  // exercises check-out, check-in and the overnight (+1) marker in one screen, and gives
+  // `dummyGuardDuty` something real to derive from.
+  {
+    stationId: "station-3",
+    guardId: "guard-1",
+    shiftId: "shift-day-short",
+    status: "checked_out",
+    checkInMinutes: 481,
+    checkOutMinutes: 960,
+  },
+  {
+    stationId: "station-6",
+    guardId: "guard-1",
+    shiftId: "shift-night",
+    status: "scheduled",
+  },
 ];
 
 export const dummyDeployment: DeploymentRow[] = buildDeployment();
@@ -315,7 +339,7 @@ function buildDeployment(): DeploymentRow[] {
         ? withMinutes(scheduledStart, spec.checkOutMinutes)
         : null,
       status: spec.status,
-      statusLabel: ASSIGNMENT_LABELS[spec.status],
+      statusLabel: ASSIGNMENT_STATUS_LABELS[spec.status],
       stationRequiredCount: station.requiredGuardCount,
       stationPresentCount: presenceByStation.get(station.id) ?? 0,
     };
@@ -394,7 +418,7 @@ function buildCoverage() {
           id: g.id,
           name: `${g.firstName} ${g.lastName}`,
           status: s.status,
-          statusLabel: ASSIGNMENT_LABELS[s.status],
+          statusLabel: ASSIGNMENT_STATUS_LABELS[s.status],
         };
       }),
     };
@@ -405,46 +429,95 @@ function buildCoverage() {
 // Guard duty, attendance, notifications
 // ---------------------------------------------------------------------------
 
-export const dummyGuardDuty: {
+/**
+ * One guard's day.
+ *
+ * **Derived, never hand-picked.** An earlier version indexed arbitrary rows of `dummyDeployment`,
+ * which quietly showed John Mwangi other guards' posts — the kind of error that is invisible in a
+ * component library and glaring on a screen labelled "My Duty". Filtering by `guardId` makes it
+ * impossible for that to happen again, and it is the same filter the real query will apply.
+ *
+ * `canCheckIn` / `canCheckOut` are derived from the attendance state and the 30-minute window
+ * rather than being asserted, so the button and the data cannot disagree.
+ */
+export function guardDutyFor(guardId: string): {
   assignment: DeploymentRow;
   attendance: AttendanceRecord | null;
   canCheckIn: boolean;
   canCheckOut: boolean;
-}[] = [
-  {
-    assignment: dummyDeployment[0],
-    attendance: null,
-    canCheckIn: true,
-    canCheckOut: false,
-  },
-  {
-    assignment: dummyDeployment[7],
-    attendance: null,
-    canCheckIn: true,
-    canCheckOut: false,
-  },
-  {
-    assignment: dummyDeployment[4],
-    attendance: {
-      id: "att-1",
-      organizationId: "org-1",
-      assignmentId: "assign-5",
-      guardId: "guard-4",
-      clientId: "client-1",
-      siteId: "site-2",
-      stationId: "station-4",
-      scheduledStart: dummyDeployment[4].scheduledStart,
-      scheduledEnd: dummyDeployment[4].scheduledEnd,
-      actualCheckIn: dummyDeployment[4].actualCheckIn,
-      actualCheckOut: null,
-      status: "present",
-      notes: null,
-      recordedBy: "guard-4",
-    },
-    canCheckIn: false,
-    canCheckOut: true,
-  },
-];
+}[] {
+  const own = dummyDeployment.filter((row) => row.guardId === guardId);
+
+  // Chronological by scheduled start: a guard reads their day in the order they will work it.
+  const ordered = [...own].sort(
+    (a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime(),
+  );
+
+  return ordered.map((assignment) => {
+    const attendance =
+      dummyAttendance.find(
+        (record) => record.assignmentId === assignment.assignmentId,
+      ) ?? null;
+
+    const now = new Date();
+    const opensAt =
+      assignment.scheduledStart.getTime() - CHECK_IN_WINDOW_MIN * 60_000;
+    const closesAt =
+      assignment.scheduledEnd.getTime() + CHECK_OUT_GRACE_MIN * 60_000;
+
+    const canCheckIn =
+      assignment.status !== "cancelled" &&
+      assignment.status !== "completed" &&
+      attendance?.actualCheckIn == null &&
+      now.getTime() >= opensAt &&
+      now.getTime() <= closesAt;
+
+    const canCheckOut =
+      attendance?.actualCheckIn != null &&
+      attendance.actualCheckOut == null &&
+      now.getTime() <= closesAt;
+
+    return { assignment, attendance, canCheckIn, canCheckOut };
+  });
+}
+
+/** Minutes before a shift opens for check-in. */
+const CHECK_IN_WINDOW_MIN = 30;
+
+/** Minutes after a shift ends during which check-out is still accepted. */
+const CHECK_OUT_GRACE_MIN = 60;
+
+/** Attendance records, keyed by the assignment they belong to. */
+const dummyAttendance: AttendanceRecord[] = dummyDeployment
+  .filter((row) => row.actualCheckIn !== null)
+  .map((row, index) => ({
+    id: `att-${index + 1}`,
+    organizationId: "org-1",
+    assignmentId: row.assignmentId,
+    guardId: row.guardId,
+    clientId: row.clientId,
+    siteId: row.siteId,
+    stationId: row.stationId,
+    scheduledStart: row.scheduledStart,
+    scheduledEnd: row.scheduledEnd,
+    actualCheckIn: row.actualCheckIn,
+    actualCheckOut: row.actualCheckOut,
+    status: deriveAttendanceStatus(row),
+    notes: null,
+    recordedBy: row.guardId,
+  }));
+
+function deriveAttendanceStatus(
+  row: DeploymentRow,
+): AttendanceRecord["status"] {
+  if (row.actualCheckOut !== null) {
+    return "present";
+  }
+  return row.status === "late" ? "late" : "present";
+}
+
+/** The demo guard's day, for the guard experience. */
+export const dummyGuardDuty = guardDutyFor("guard-1");
 
 export const dummyNotifications: Notification[] = [
   {
@@ -503,8 +576,6 @@ function lookup<T extends { id: string }>(
   }
   return found;
 }
-
-let guardSequence = 0;
 
 function guard(
   id: string,
@@ -589,16 +660,6 @@ function shift(id: string, name: string, start: string, end: string): Shift {
 export function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
-
-const ASSIGNMENT_LABELS: Record<AssignmentStatus, string> = {
-  scheduled: "SCHEDULED",
-  on_duty: "ON DUTY",
-  late: "LATE",
-  absent: "ABSENT",
-  checked_out: "CHECKED OUT",
-  completed: "COMPLETED",
-  cancelled: "CANCELLED",
-};
 
 /** Demo credentials shown on the login screen during development. */
 export const DUMMY_CREDENTIALS = [

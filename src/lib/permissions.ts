@@ -9,7 +9,7 @@
  * See docs/rbac.md.
  */
 
-import type { Role } from "@/constants/domain";
+import { CLIENT_ROLES, type Role, SELF_SCOPED_ROLES } from "@/constants/domain";
 
 export const PERMISSIONS = [
   "users:read",
@@ -17,6 +17,14 @@ export const PERMISSIONS = [
   "users:update",
   "users:deactivate",
   "guards:read",
+  /**
+   * Name-only guard projection: name, employee number and current assignment status at the
+   * caller's own sites. Deliberately separate from `guards:read` so a client can see *who is
+   * guarding my building* without ever reaching employment records, phone numbers, national ID or
+   * documents. A client has no operational reason to hold `guards:read`, and granting it would
+   * mean over-exposing personal data to make a UI convenience cheaper.
+   */
+  "guards:read_public",
   "guards:create",
   "guards:update",
   "clients:read",
@@ -77,6 +85,7 @@ const CLIENT_READ: readonly Permission[] = [
   "attendance:read",
   "coverage:read",
   "deployment:read",
+  "guards:read_public",
   "reports:read",
   "reports:export",
   "notifications:read",
@@ -148,6 +157,23 @@ export const ROLE_PERMISSIONS: Record<Role, readonly ScopedGrant[]> = {
 // ---------------------------------------------------------------------------
 
 /**
+ * True when a role's *scope* covers the whole organisation rather than a slice of it.
+ *
+ * Separate from `can()` on purpose, because permission and scope answer different questions and a
+ * capability check cannot tell them apart. Client roles are granted `deployment:read` — a client
+ * legitimately needs to see guards at their own buildings — but that grant is scoped to their own
+ * `clientId`. Rendering the company's unscoped deployment board to them would be a tenant leak even
+ * though `can(role, "deployment:read")` returned true.
+ *
+ * So any page that reads *unscoped* rows must assert both: the capability **and** org-wide scope.
+ * Pages that read scoped rows should not call this at all, and instead narrow by `clientId` in the
+ * query.
+ */
+export function hasOrgWideScope(role: Role): boolean {
+  return !CLIENT_ROLES.includes(role) && !SELF_SCOPED_ROLES.includes(role);
+}
+
+/**
  * Pure capability check.
  *
  * Navigation and buttons call this to *hide* what a user cannot do. That is a convenience
@@ -211,6 +237,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   "users:update": "Edit users",
   "users:deactivate": "Deactivate users",
   "guards:read": "View guards",
+  "guards:read_public": "View guard names and duty status (own sites)",
   "guards:create": "Create guards",
   "guards:update": "Edit guards",
   "clients:read": "View clients",

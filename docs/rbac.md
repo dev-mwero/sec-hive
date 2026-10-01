@@ -54,6 +54,7 @@ that silently disables tenant isolation.
 | `users:update` | ✔ | · | · | own client | · | · |
 | `users:deactivate` | ✔ | · | · | · | · | · |
 | `guards:read` | ✔ | assigned | assigned | · | · | own |
+| `guards:read_public` | ✔ | assigned | assigned | own client | own client | · |
 | `guards:create` | ✔ | · | · | · | · | · |
 | `guards:update` | ✔ | · | · | · | · | · |
 | `clients:read` | ✔ | assigned | assigned | own | own | · |
