@@ -1,36 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SecHive — Security Hive
 
-## Getting Started
+> **Know Who's on Guard. Know Where. Know When.**
 
-First, run the development server:
+Multi-tenant SaaS for private security companies to manage guard deployment across client
+sites — live deployment, duty assignments, attendance and station coverage.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+Security Company → Client → Site → Station → Duty Assignment → Guard → Attendance
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+SecHive is a **deployment** platform. `DutyAssignment` is the first-class entity; attendance
+is the evidence that a deployment actually happened.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Stack
 
-## Learn More
+| Layer         | Choice                                  |
+| ------------- | --------------------------------------- |
+| Framework     | Next.js 16.3 (App Router, Turbopack)    |
+| Language      | TypeScript 5 (strict)                    |
+| UI            | React 19.2 · Tailwind v4 · shadcn/ui · Lucide |
+| Forms/valid.  | React Hook Form · Zod 4                 |
+| Database      | MongoDB (Atlas) · Mongoose 9            |
+| Auth          | Auth.js / NextAuth v5 (Credentials + JWT) |
+| Lint          | Biome 2                                  |
+| Tests         | Vitest · Playwright                     |
+| Deploy        | Vercel + MongoDB Atlas                  |
 
-To learn more about Next.js, take a look at the following resources:
+## Getting started
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm install
+cp .env.example .env.local     # fill in MONGODB_URI + AUTH_SECRET
+npm run dev                    # http://localhost:3000
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run lint        # biome check
+npm run typecheck   # tsc --noEmit
+npm run build       # next build
+```
 
-## Deploy on Vercel
+## Architecture at a glance
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **Tenant** = `Organization` (the security company). Every tenant-owned document carries a
+  required `organizationId`.
+- **Isolation is enforced server-side in three places**: query scope, ownership re-verification
+  on every mutation, and a type-level requirement that a filter carry `organizationId`.
+- **Authorisation** is a role → permission matrix plus a scope that can only narrow.
+- **Client portal** reads live under `/api/v1/portal` with a stripped guard projection — no HR
+  fields ever reach a client.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Documentation
+
+| Doc                                                | Contents                                              |
+| -------------------------------------------------- | ----------------------------------------------------- |
+| [architecture.md](docs/architecture.md)             | Stack, layering, data flow, branching, risks           |
+| [database.md](docs/database.md)                     | Models, indexes, status machines, historical integrity |
+| [rbac.md](docs/rbac.md)                             | Roles, permission matrix, scopes, escalation controls  |
+| [api.md](docs/api.md)                               | Endpoints, envelopes, error codes, security middleware |
+| [security.md](docs/security.md)                     | Threat model and controls                              |
+| [roadmap.md](docs/roadmap.md)                       | Phases, scope discipline, anti-scope rules             |
+
+## Key decisions
+
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Auth | Auth.js v5, Credentials + JWT | Self-hosted; JWT carries `organizationId` + `role` so authorisation is a pure check |
+| Client portal auth | Same system, `CLIENT_ADMIN` / `CLIENT_VIEWER` roles with a `clientId` scope | One RBAC matrix serves both company and portal |
+| Shift times | `Date` pinned to 1970-01-01, read via minutes-since-midnight | Numeric arithmetic and range queries, no string parsing |
+| Overnight shifts | `crossesMidnight` flag; `scheduledEnd` lands on the next day | Night shifts are first-class, not a special case |
+| Lateness | Per-organisation `gracePeriodMinutes` (default 5) | Tolerance is company policy — 5, 15, or strict |
+| Real-time | SSR + explicit refresh + 30s polling, labelled honestly | Polling is not real-time and the UI does not pretend it is |
+| Assignment conflicts | **Blocked** with `409`, not warned | A silently double-booked guard is worse than a failed form |
+| Demo data | Typed dummy data in `src/data/`, UI built first | Layout decisions are cheap while data is fake |
+
+## Branching
+
+```
+main          protected, releasable
+ └── dev      integration branch
+      ├── feat/<slug>
+      └── fix/<slug>
+```
+
+Each phase lands as meaningful conventional commits and merges to `dev` only after
+`biome check`, `tsc --noEmit` and `next build` are clean.
+
+## Status
+
+Development in progress. See [roadmap.md](docs/roadmap.md).
