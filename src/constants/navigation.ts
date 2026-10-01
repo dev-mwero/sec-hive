@@ -320,8 +320,37 @@ export const CLIENT_NAV_SECTIONS: NavSection[] = [
 ];
 
 /**
+ * Terminal route for a caller entitled to no surface at all.
+ *
+ * A redirect target has to be somewhere the reader can stay, and for a role that holds no
+ * capability on any page there is no such place. `NO_ACCESS_ROUTE` is that place: it renders for
+ * every role, redirects nowhere, and reads nothing. Every other home below is a page that can
+ * refuse the role that was sent to it, which is what makes a redirect chain out of it possible.
+ */
+export const NO_ACCESS_ROUTE = "/no-access";
+
+/**
  * Home route for a role. A guard lands on their duty card, not on an operations dashboard they
  * have no data for; a client lands on their coverage view.
+ *
+ * **It has to return somewhere the role can actually stay.** Every page that reads unscoped
+ * organisation rows sends an unauthorised role here, so the value returned must not itself be a
+ * page that redirects back. Pointing a `supervisor` at `/dashboard` or `/dashboard/live` — both of
+ * which assert `hasOrgWideScope()`, and correctly so — is a redirect loop rather than a home, and
+ * a loop is how a fix for one leak becomes a way to reach it again by pressing back.
+ *
+ * `/sites` is already the site-scoped destination in `NAV_SECTIONS`, gated on `sites:read`, which
+ * is exactly the grant `supervisor` and `site_manager` hold over their assigned sites. It becomes
+ * their real home once the scope-filtered board lands there; until then it is a placeholder, which
+ * is still a surface they can be sent to without exposing a row they are not entitled to.
+ *
+ * **The organisation-wide roles are named, not inherited from `default`.** They were relying on it,
+ * which meant `default` had to be a surface those two can open — and therefore could not fail
+ * closed. A role added to `ROLES` but classified nowhere lands in `default`, and would have been
+ * dropped onto `/dashboard`, which sends it straight back here by way of `homeForRole`. It now
+ * lands on `NO_ACCESS_ROUTE`: least privilege, and terminal. `Role` is a closed union so the branch
+ * is unreachable today; it is written the way the security tests in `src/lib/security.test.ts`
+ * already assert an unclassified role should behave.
  */
 export function homeForRole(role: Role): string {
   switch (role) {
@@ -330,9 +359,37 @@ export function homeForRole(role: Role): string {
     case "client_admin":
     case "client_viewer":
       return "/portal";
-    default:
+    case "supervisor":
+    case "site_manager":
+      return "/sites";
+    case "platform_admin":
+    case "security_company_admin":
       return "/dashboard";
+    default:
+      return NO_ACCESS_ROUTE;
   }
+}
+
+/**
+ * The role's home, unless that home is the page asking.
+ *
+ * A page that fails closed still has to answer the caller with somewhere to go, and `homeForRole`
+ * alone cannot guarantee that: when a role's home *is* the page redirecting, the redirect is a
+ * loop. `/portal` was the live example — a client role's home is `/portal`, so a client with no
+ * `clientId` bounced `/portal` → `/dashboard` → `homeForRole()` → `/portal` forever.
+ *
+ * So a page whose own path is a role's home must send that role to `NO_ACCESS_ROUTE` instead. The
+ * check is written here rather than in each page because "this page might be my own redirect
+ * target" is a property of the *mapping*, and duplicating the comparison in every caller is how
+ * the next page forgets it.
+ *
+ * `fromPath` is the path of the page doing the redirect, as it appears in a URL — no query string,
+ * no trailing slash — which is what makes it comparable to the literals above.
+ */
+export function safeHomeForRole(role: Role, fromPath: string): string {
+  const home = homeForRole(role);
+
+  return home === fromPath ? NO_ACCESS_ROUTE : home;
 }
 
 /**

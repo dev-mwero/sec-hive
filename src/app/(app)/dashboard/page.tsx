@@ -18,6 +18,7 @@ import {
   dummyDeployment,
   dummyNotifications,
 } from "@/data/dummy";
+import { can, hasOrgWideScope } from "@/lib/permissions";
 import { getSession } from "@/server/auth/session";
 
 /**
@@ -26,6 +27,10 @@ import { getSession } from "@/server/auth/session";
  * Answers one question before anything else: *is every post covered right now?* Four counters, a
  * coverage ledger, then the exceptions list. Deployment detail lives on `/dashboard/live`; this
  * page is the summary an owner or admin reads in ten seconds.
+ *
+ * The permission check below is real, not decorative, and it is two checks rather than one for the
+ * same reason `/dashboard/live` is — this page renders the same unscoped rows, so it fails closed
+ * on exactly the same condition.
  */
 export default async function DashboardPage() {
   const session = await getSession();
@@ -34,11 +39,23 @@ export default async function DashboardPage() {
     redirect("/login");
   }
 
-  // Guards and client users have their own surfaces. Redirecting beats rendering a screen of
-  // zeroes for a role that has no data on this page.
-  const home = homeForRole(session.user.role);
-  if (home !== "/dashboard") {
-    redirect(home);
+  // Both checks are required, and the second is the one that matters.
+  //
+  // `deployment:read` is granted to every operational role — client, site-scoped and company
+  // alike — so on its own this gate is a formality. What the page renders is the *unscoped*
+  // reading: `dummyDeployment` and `dummyCoverage` are the whole company's roster, every client
+  // and every station, with nothing narrowing them by `clientId` or `siteId`. A supervisor's grant
+  // is `assigned` and a client's is their own account (docs/rbac.md:82); neither is a licence to
+  // read the aggregate. The counters at the top are the leak as much as the table below them — a
+  // rostered count is a headcount for one client and a staffing figure for another.
+  if (
+    !can(session.user.role, "deployment:read") ||
+    !hasOrgWideScope(session.user.role)
+  ) {
+    // Their own home rather than a bare 403: a guard gets the duty card, a client their coverage
+    // portal, site-scoped staff their sites. Reveals nothing, since none of them was entitled to
+    // these rows.
+    redirect(homeForRole(session.user.role));
   }
 
   const generatedAt = new Date();

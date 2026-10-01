@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DASHBOARD_POLL_INTERVAL_MS } from "@/constants/domain";
+import { safeHomeForRole } from "@/constants/navigation";
 import { dummyGuardDuty } from "@/data/dummy";
 import { can } from "@/lib/permissions";
 import { formatHHMM, timeToMinutes } from "@/lib/time";
@@ -40,8 +41,12 @@ export default async function MyDutyPage() {
 
   const { user } = session;
 
+  // Not a bare `/dashboard`. A supervisor is redirected here for exactly the reason a guard is not,
+  // and `/dashboard` answers a supervisor by calling `homeForRole` — so the hop has to be made
+  // through the same mapping, and through the variant that refuses to send a role to the page doing
+  // the sending. Without that, "send the caller home" is a loop for any role homed here.
   if (!can(user.role, "attendance:checkin")) {
-    redirect("/dashboard");
+    redirect(safeHomeForRole(user.role, "/my-duty"));
   }
 
   const generatedAt = new Date();

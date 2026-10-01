@@ -8,8 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Metric, MetricRow } from "@/components/ui/metric";
 import { DEPLOYMENT_POLL_INTERVAL_MS } from "@/constants/domain";
+import { NO_ACCESS_ROUTE, safeHomeForRole } from "@/constants/navigation";
 import { DUMMY, dummyCoverage, dummyDeployment } from "@/data/dummy";
-import { can } from "@/lib/permissions";
+import { can, isClientRole } from "@/lib/permissions";
 import { getSession } from "@/server/auth/session";
 
 /**
@@ -36,8 +37,30 @@ export default async function PortalOverviewPage() {
 
   const { user } = session;
 
-  if (!can(user.role, "coverage:read") || !user.clientId) {
-    redirect("/dashboard");
+  // Two failures, and they do not have the same answer.
+  //
+  // Failing `coverage:read` means this role simply belongs on another surface — the duty card, the
+  // site board — so it is sent to its own home. `safeHomeForRole` rather than `homeForRole`, because
+  // a client's home *is* `/portal`, and a redirect from a page to itself is a loop: that is what
+  // `/portal` → `/dashboard` → `homeForRole()` → `/portal` was for every client who ever landed
+  // here without `coverage:read`.
+  if (!can(user.role, "coverage:read")) {
+    redirect(safeHomeForRole(user.role, "/portal"));
+  }
+
+  // Holding `coverage:read` with nothing to narrow by is the case `resolveScope` already fails closed
+  // for — a client user record that has not been attached to a client account — and every row below
+  // is filtered on `session.user.clientId`. The honest result would therefore be an empty portal,
+  // which to a client is indistinguishable from SecHive being broken.
+  if (!user.clientId) {
+    // A client role owns no surface but this one, so with no client there is nothing left to send
+    // them to and `NO_ACCESS_ROUTE` is the only terminal answer. Any other role is not in the wrong
+    // place, it is simply somewhere it does not belong, and its own home is still open to it.
+    redirect(
+      isClientRole(user.role)
+        ? NO_ACCESS_ROUTE
+        : safeHomeForRole(user.role, "/portal"),
+    );
   }
 
   // Tenant scoping. One filter, applied first, so no later branch can forget it.
