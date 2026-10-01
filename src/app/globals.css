@@ -37,7 +37,13 @@
   /* Type */
   --foreground: #e9eef3;
   --foreground-muted: #93a4b1;
-  --foreground-subtle: #64757f;
+  /*
+   * Subtle is the quietest text that is still *text*: `.label-block`, table headers, employee
+   * numbers, timestamps. Not decorative, so it must clear 4.5:1 on every surface it is used on —
+   * solved against the lightest dark surface, not just the page background, because 11px type on
+   * `surface-raised` is the real worst case.
+   */
+  --foreground-subtle: #808e96;
 
   /* Accent — floodlight amber */
   --accent: #f5a524;
@@ -97,7 +103,7 @@
   --border-strong: #c2ced7;
   --foreground: #0e1419;
   --foreground-muted: #4c5c68;
-  --foreground-subtle: #6d7d88;
+  --foreground-subtle: #606e78;
   --accent: #a86300;
   --accent-hover: #8d5200;
   --accent-foreground: #ffffff;
@@ -300,6 +306,28 @@
     background-color: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
+  }
+
+  /*
+   * Expand a small control's touch target to 44px without changing how large it looks.
+   *
+   * A 32px icon button is optically correct in a dense toolbar and too small under a thumb. The
+   * pseudo-element carries the extra area, so the icon stays centred and the row keeps its
+   * rhythm — whereas padding the button out to 44px would make a header icon taller than the text
+   * beside it.
+   */
+  .tap-expand {
+    position: relative;
+  }
+
+  .tap-expand::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
   }
 }
 
