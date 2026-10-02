@@ -58,16 +58,18 @@ function gateDashboardLive(role: Role, _session: SessionShape): GateResult {
 }
 
 function gatePortal(role: Role, session: SessionShape): GateResult {
-  // Mirrors: src/app/(app)/portal/page.tsx lines ~70-110
-  // First: can(role,"coverage:read") else safeHomeForRole(role, "/portal")
-  // Second: if !clientId, redirect isClientRole ? NO_ACCESS_ROUTE : safeHomeForRole(role,"/portal")
+  // Mirrors: src/app/(app)/portal/page.tsx — client-class boundary (order: isClientRole, can, clientId)
+  // 1. Non-client roles: safeHomeForRole(role,"/portal") (client surface)
+  // 2. Client roles without coverage:read: safeHomeForRole(role,"/portal")
+  // 3. Client roles with no clientId: NO_ACCESS_ROUTE (collapsed, non-clients already excluded)
+  if (!isClientRole(role)) {
+    return safeHomeForRole(role, "/portal");
+  }
   if (!can(role, "coverage:read")) {
     return safeHomeForRole(role, "/portal");
   }
   if (!session.clientId) {
-    return CLIENT_ROLES.includes(role)
-      ? NO_ACCESS_ROUTE
-      : safeHomeForRole(role, "/portal");
+    return NO_ACCESS_ROUTE;
   }
   return "render";
 }
@@ -447,6 +449,116 @@ describe("Redirect graph invariants", () => {
       expect(CLIENT_ROLES_SET.has(unclassified)).toBe(false);
       expect(SITE_SCOPED_ROLES_SET.has(unclassified)).toBe(false);
       expect(SELF_SCOPED_ROLES_SET.has(unclassified)).toBe(false);
+    });
+
+    describe("/portal gate (client surface)", () => {
+      it("does not render for any non-client role, even if they hold coverage:read and have a clientId", () => {
+        // A capability grant (`coverage:read`) is not an invitation to the client portal. This covers
+        // org-wide, site-scoped (supervisor/site_manager), guard (self-scoped), and any role class
+        // outside the client bucket. The class boundary is enforced first.
+        const sessionWithClient: SessionShape = { clientId: "client-1" };
+
+        for (const role of ROLES) {
+          if (isClientRole(role)) {
+            continue;
+          }
+          const hasCoverage = can(role, "coverage:read");
+          const res = GATES["/portal"](role, sessionWithClient);
+          expect(
+            res,
+            `/portal must not render for non-client ${role}`,
+          ).not.toBe("render");
+          // Non-clients go to their own home via safeHomeForRole, never to NO_ACCESS_ROUTE
+          expect(res).not.toBe(NO_ACCESS_ROUTE);
+          if (hasCoverage) {
+            // The redirect is a surface decision, not a capability one: with coverage but wrong class,
+            // they land on their home (not the terminal screen). This invariant matters if the matrix
+            // ever changes.
+            expect(res).toBe(safeHomeForRole(role, "/portal"));
+          }
+        }
+      });
+
+      it("sends a site-scoped user WITH a clientId to /sites, not rendered (behaviour change)", () => {
+        // `user.clientId` is incidental for site-scoped roles. The correct surface is the sites board,
+        // not the client's personal portal. This pins the new class-first order explicitly.
+        const sessionWithClient: SessionShape = { clientId: "client-1" };
+
+        for (const role of SITE_SCOPED_ROLES) {
+          const res = GATES["/portal"](role, sessionWithClient);
+          expect(can(role, "coverage:read")).toBe(true);
+          expect(
+            res,
+            `${role} with clientId must go to /sites, not rendered`,
+          ).toBe("/sites");
+          expect(res).not.toBe("render");
+        }
+      });
+
+      it("coverage:read remains granted to supervisor and site_manager (surface decision only)", () => {
+        // Removing `coverage:read` from supervisor/site_manager would hide Coverage from their nav
+        // (`/dashboard/coverage`) and is not the fix. The portal gate narrows by class; this assertion
+        // prevents a future matrix edit from quietly turning the fix into a no-op.
+        for (const role of SITE_SCOPED_ROLES) {
+          expect(
+            can(role, "coverage:read"),
+            `${role} must hold coverage:read`,
+          ).toBe(true);
+        }
+      });
+
+      it("renders for client roles with coverage and a clientId; without clientId goes to NO_ACCESS_ROUTE", () => {
+        for (const role of CLIENT_ROLES) {
+          expect(
+            can(role, "coverage:read"),
+            `${role} must hold coverage:read`,
+          ).toBe(true);
+          expect(
+            GATES["/portal"](role, { clientId: "client-1" }),
+            `${role} with clientId renders`,
+          ).toBe("render");
+          expect(
+            GATES["/portal"](role, { clientId: null }),
+            `${role} without clientId hits NO_ACCESS_ROUTE`,
+          ).toBe(NO_ACCESS_ROUTE);
+        }
+      });
+
+      it("sends client roles without coverage:read to their home (safeHomeForRole)", () => {
+        // Though the current matrix grants coverage:read to all client roles, the gate handles it
+        // explicitly and safely. If coverage is lost, they go home (which for clients is /portal) —
+        // safeHomeForRole prevents self-redirect loops.
+        for (const role of CLIENT_ROLES) {
+          const res = GATES["/portal"](role, { clientId: "client-1" });
+          if (can(role, "coverage:read")) {
+            expect(res).toBe("render");
+          } else {
+            expect(res).toBe(safeHomeForRole(role, "/portal"));
+          }
+        }
+      });
+
+      it("non-client roles without coverage go to their home via safeHomeForRole, not NO_ACCESS_ROUTE", () => {
+        const sessionWithClient: SessionShape = { clientId: "client-1" };
+        for (const role of ROLES) {
+          if (isClientRole(role)) {
+            continue;
+          }
+          if (can(role, "coverage:read")) {
+            // Class fails first
+            expect(GATES["/portal"](role, sessionWithClient)).toBe(
+              safeHomeForRole(role, "/portal"),
+            );
+          } else {
+            expect(GATES["/portal"](role, sessionWithClient)).toBe(
+              safeHomeForRole(role, "/portal"),
+            );
+            expect(GATES["/portal"](role, sessionWithClient)).not.toBe(
+              NO_ACCESS_ROUTE,
+            );
+          }
+        }
+      });
     });
   });
 });

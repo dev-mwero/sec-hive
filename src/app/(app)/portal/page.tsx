@@ -37,30 +37,39 @@ export default async function PortalOverviewPage() {
 
   const { user } = session;
 
-  // Two failures, and they do not have the same answer.
+  // Class boundary: `/portal` is a client surface, not a general capability surface.
   //
-  // Failing `coverage:read` means this role simply belongs on another surface — the duty card, the
-  // site board — so it is sent to its own home. `safeHomeForRole` rather than `homeForRole`, because
-  // a client's home *is* `/portal`, and a redirect from a page to itself is a loop: that is what
-  // `/portal` → `/dashboard` → `homeForRole()` → `/portal` was for every client who ever landed
-  // here without `coverage:read`.
+  // A capability grant is not an invitation to a particular screen. The presence of `coverage:read`
+  // on supervisor and site_manager roles is intentional — those roles legitimately need it for the
+  // company's own surface (`/dashboard/coverage`), not for the client's personal coverage view.
+  // Resolving those site-scoped roles yields `sitesScope(siteIds)`, not `clientScope`, and site
+  // membership itself is sourced from `Site.supervisorIds` rather than `user.clientId`. Treating a
+  // nullable `user.clientId` as proof of "being a client" conflates a data-modelling quirk with an
+  // authorization boundary. A `clientId` on a non-client user does not make them a client, and
+  // widening this page to such a role would blur the separation between company surfaces and the
+  // client's own view.
+  //
+  // Gate in this order to enforce that boundary while keeping redirects safe:
+  //
+  // 1. **Role class first.** Only client roles may access the client portal. If the user is not a
+  //    client, they are sent to their own home via `safeHomeForRole` (not this page). This prevents
+  //    site-scoped operators from entering a client view even if they also hold `coverage:read` and
+  //    happen to have a `clientId`.
+  // 2. **Capability second.** Even client roles must be able to read coverage; if not, send them to
+  //    their home for their role (using `safeHomeForRole` to avoid self-redirect loops).
+  // 3. **Identity last.** With only client roles remaining, a missing `clientId` means the account
+  //    is not attached to any client. Since the client portal cannot render scoped rows without that
+  //    key (and every row below is filtered on `session.user.clientId`), there is no safe target on
+  //    this surface — redirect to `NO_ACCESS_ROUTE`. This collapses the previous ternary because
+  //    non-client roles were already excluded in step 1.
+  if (!isClientRole(user.role)) {
+    redirect(safeHomeForRole(user.role, "/portal"));
+  }
   if (!can(user.role, "coverage:read")) {
     redirect(safeHomeForRole(user.role, "/portal"));
   }
-
-  // Holding `coverage:read` with nothing to narrow by is the case `resolveScope` already fails closed
-  // for — a client user record that has not been attached to a client account — and every row below
-  // is filtered on `session.user.clientId`. The honest result would therefore be an empty portal,
-  // which to a client is indistinguishable from SecHive being broken.
   if (!user.clientId) {
-    // A client role owns no surface but this one, so with no client there is nothing left to send
-    // them to and `NO_ACCESS_ROUTE` is the only terminal answer. Any other role is not in the wrong
-    // place, it is simply somewhere it does not belong, and its own home is still open to it.
-    redirect(
-      isClientRole(user.role)
-        ? NO_ACCESS_ROUTE
-        : safeHomeForRole(user.role, "/portal"),
-    );
+    redirect(NO_ACCESS_ROUTE);
   }
 
   // Tenant scoping. One filter, applied first, so no later branch can forget it.
