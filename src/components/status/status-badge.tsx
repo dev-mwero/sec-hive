@@ -22,11 +22,19 @@ export function StatusBadge({
   size = "md",
   className,
   showIcon = true,
+  label,
 }: {
   style: StatusStyle;
   size?: "sm" | "md";
   className?: string;
   showIcon?: boolean;
+  /**
+   * Display text in place of `style.label`, for a counted status — "2 UNCOVERED" is the same status
+   * with a number attached, and re-implementing the badge at the call site to add the count is how a
+   * badge ends up with colour and no icon. The tone, icon and `description` still come from `style`,
+   * so the override cannot change what the badge *means*, only how it reads.
+   */
+  label?: string;
 }) {
   const Icon = style.icon;
 
@@ -38,7 +46,7 @@ export function StatusBadge({
       title={style.description}
     >
       {showIcon ? <Icon aria-hidden className="size-3 shrink-0" /> : null}
-      {style.label}
+      {label ?? style.label}
     </Badge>
   );
 }
